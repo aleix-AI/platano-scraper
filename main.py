@@ -1,528 +1,217 @@
-import telebot
-import os
 import requests
-from bs4 import BeautifulSoup
-import sqlite3
-import threading
-import time
+import json
+import csv
 import psycopg2
-from psycopg2 import sql
-import logging
+from bs4 import BeautifulSoup
+import time
+import os
+from urllib.parse import urljoin
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Tokens dels bots (ara des de variables d'entorn)
-CLIENT_BOT_TOKEN = os.environ.get('CLIENT_BOT_TOKEN')
-ADMIN_BOT_TOKEN = os.environ.get('ADMIN_BOT_TOKEN') 
-DATABASE_URL = os.environ.get('DATABASE_URL')
-
-# Verificar que tenim tots els tokens
-if not CLIENT_BOT_TOKEN or not ADMIN_BOT_TOKEN:
-    logger.error("ERROR: Tokens dels bots no configurats!")
-    exit(1)
-
-# Crear bots
-client_bot = telebot.TeleBot(CLIENT_BOT_TOKEN)
-admin_bot = telebot.TeleBot(ADMIN_BOT_TOKEN)
-
-# ID de l'administrador
-ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID')
-if ADMIN_USER_ID:
-    ADMIN_USER_ID = int(ADMIN_USER_ID)
-
-class DatabaseManager:
-    def __init__(self, database_url=None):
-        if database_url:
-            # PostgreSQL (Railway)
-            self.connection = psycopg2.connect(database_url)
-            self.is_postgresql = True
-            logger.info("Connectat a PostgreSQL")
-        else:
-            # SQLite (desenvolupament local)
-            self.connection = sqlite3.connect('godsells.db', check_same_thread=False)
-            self.is_postgresql = False
-            logger.info("Usant SQLite local")
+class PlatanoscrapeR:
+    def __init__(self):
+        self.base_url = "https://platanosneaker.com"
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        self.products = []
         
-        self.create_tables()
-    
-    def create_tables(self):
-        cursor = self.connection.cursor()
+    def get_all_product_links(self):
+        """Extreu tots els enllaços de productes de la web"""
+        print("🔍 Buscant tots els enllaços de productes...")
         
-        if self.is_postgresql:
-            # PostgreSQL queries
-            queries = [
-                """
-                CREATE TABLE IF NOT EXISTS productes (
-                    id SERIAL PRIMARY KEY,
-                    nom VARCHAR(255) NOT NULL,
-                    descripcio TEXT,
-                    categoria VARCHAR(100),
-                    talles_disponibles TEXT,
-                    preu_web_platanos DECIMAL(10,2),
-                    preu_venda_meu DECIMAL(10,2),
-                    marge DECIMAL(5,2),
-                    url_producte TEXT,
-                    imatge_url TEXT,
-                    data_afegit TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    actiu BOOLEAN DEFAULT TRUE
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS consultes_pendents (
-                    id SERIAL PRIMARY KEY,
-                    client_user_id BIGINT NOT NULL,
-                    client_nom VARCHAR(100),
-                    client_username VARCHAR(100),
-                    producte_buscat TEXT NOT NULL,
-                    descripcio TEXT,
-                    foto_url TEXT,
-                    data_consulta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    estat VARCHAR(20) DEFAULT 'pendent'
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS comandes (
-                    id SERIAL PRIMARY KEY,
-                    client_user_id BIGINT NOT NULL,
-                    client_nom VARCHAR(100),
-                    producte_id INTEGER REFERENCES productes(id),
-                    producte_nom TEXT,
-                    talla VARCHAR(10),
-                    preu_final DECIMAL(10,2),
-                    estat VARCHAR(20) DEFAULT 'pendent',
-                    data_comanda TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    notes TEXT
-                )
-                """
-            ]
-        else:
-            # SQLite queries
-            queries = [
-                """
-                CREATE TABLE IF NOT EXISTS productes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nom TEXT NOT NULL,
-                    descripcio TEXT,
-                    categoria TEXT,
-                    talles_disponibles TEXT,
-                    preu_web_platanos REAL,
-                    preu_venda_meu REAL,
-                    marge REAL,
-                    url_producte TEXT,
-                    imatge_url TEXT,
-                    data_afegit TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    actiu INTEGER DEFAULT 1
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS consultes_pendents (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    client_user_id INTEGER NOT NULL,
-                    client_nom TEXT,
-                    client_username TEXT,
-                    producte_buscat TEXT NOT NULL,
-                    descripcio TEXT,
-                    foto_url TEXT,
-                    data_consulta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    estat TEXT DEFAULT 'pendent'
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS comandes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    client_user_id INTEGER NOT NULL,
-                    client_nom TEXT,
-                    producte_id INTEGER,
-                    producte_nom TEXT,
-                    talla TEXT,
-                    preu_final REAL,
-                    estat TEXT DEFAULT 'pendent',
-                    data_comanda TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    notes TEXT,
-                    FOREIGN KEY (producte_id) REFERENCES productes (id)
-                )
-                """
-            ]
+        # URLs de categories conegudes
+        category_urls = [
+            f"{self.base_url}/",  # Página principal
+            f"{self.base_url}/products/",  # Si tenen pàgina de productes
+        ]
         
-        for query in queries:
+        product_links = set()
+        
+        for url in category_urls:
             try:
-                cursor.execute(query)
-                self.connection.commit()
-                logger.info("Taula creada correctament")
+                response = requests.get(url, headers=self.headers)
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Buscar enllaços que puguin ser productes
+                links = soup.find_all('a', href=True)
+                
+                for link in links:
+                    href = link.get('href')
+                    if href and '/products/' in href:
+                        full_url = urljoin(self.base_url, href)
+                        product_links.add(full_url)
+                
             except Exception as e:
-                logger.error(f"Error creant taula: {e}")
+                print(f"❌ Error extraient de {url}: {e}")
         
-        cursor.close()
+        print(f"✅ Trobats {len(product_links)} enllaços de productes")
+        return list(product_links)
     
-    def buscar_producte(self, terme_cerca):
-        cursor = self.connection.cursor()
-        if self.is_postgresql:
-            query = "SELECT * FROM productes WHERE LOWER(nom) LIKE LOWER(%s) OR LOWER(descripcio) LIKE LOWER(%s) AND actiu = TRUE"
-            cursor.execute(query, (f'%{terme_cerca}%', f'%{terme_cerca}%'))
-        else:
-            query = "SELECT * FROM productes WHERE (LOWER(nom) LIKE LOWER(?) OR LOWER(descripcio) LIKE LOWER(?)) AND actiu = 1"
-            cursor.execute(query, (f'%{terme_cerca}%', f'%{terme_cerca}%'))
-        
-        result = cursor.fetchone()
-        cursor.close()
-        return result
-    
-    def afegir_consulta_pendent(self, user_id, nom_usuari, username, producte_buscat, descripcio=""):
-        cursor = self.connection.cursor()
-        if self.is_postgresql:
-            query = "INSERT INTO consultes_pendents (client_user_id, client_nom, client_username, producte_buscat, descripcio) VALUES (%s, %s, %s, %s, %s)"
-        else:
-            query = "INSERT INTO consultes_pendents (client_user_id, client_nom, client_username, producte_buscat, descripcio) VALUES (?, ?, ?, ?, ?)"
-        
-        cursor.execute(query, (user_id, nom_usuari, username, producte_buscat, descripcio))
-        self.connection.commit()
-        cursor.close()
-    
-    def obtenir_consultes_pendents(self):
-        cursor = self.connection.cursor()
-        if self.is_postgresql:
-            query = "SELECT * FROM consultes_pendents WHERE estat = %s ORDER BY data_consulta DESC"
-            cursor.execute(query, ('pendent',))
-        else:
-            query = "SELECT * FROM consultes_pendents WHERE estat = ? ORDER BY data_consulta DESC"
-            cursor.execute(query, ('pendent',))
-        
-        results = cursor.fetchall()
-        cursor.close()
-        return results
-    
-    def afegir_producte(self, nom, descripcio, categoria, talles, preu_web, preu_venda, url="", imatge=""):
-        cursor = self.connection.cursor()
-        marge = ((preu_venda - preu_web) / preu_web) * 100 if preu_web > 0 else 0
-        
-        if self.is_postgresql:
-            query = """INSERT INTO productes (nom, descripcio, categoria, talles_disponibles, 
-                      preu_web_platanos, preu_venda_meu, marge, url_producte, imatge_url) 
-                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id"""
-        else:
-            query = """INSERT INTO productes (nom, descripcio, categoria, talles_disponibles, 
-                      preu_web_platanos, preu_venda_meu, marge, url_producte, imatge_url) 
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-        
-        cursor.execute(query, (nom, descripcio, categoria, talles, preu_web, preu_venda, marge, url, imatge))
-        
-        if self.is_postgresql:
-            product_id = cursor.fetchone()[0]
-        else:
-            product_id = cursor.lastrowid
+    def extract_product_info(self, product_url):
+        """Extreu informació d'un producte específic"""
+        try:
+            response = requests.get(product_url, headers=self.headers)
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-        self.connection.commit()
-        cursor.close()
-        return product_id
-    
-    def crear_comanda(self, user_id, nom_usuari, producte_id, producte_nom, talla, preu_final):
-        cursor = self.connection.cursor()
-        if self.is_postgresql:
-            query = """INSERT INTO comandes (client_user_id, client_nom, producte_id, producte_nom, talla, preu_final) 
-                      VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"""
-        else:
-            query = """INSERT INTO comandes (client_user_id, client_nom, producte_id, producte_nom, talla, preu_final) 
-                      VALUES (?, ?, ?, ?, ?, ?)"""
-        
-        cursor.execute(query, (user_id, nom_usuari, producte_id, producte_nom, talla, preu_final))
-        
-        if self.is_postgresql:
-            order_id = cursor.fetchone()[0]
-        else:
-            order_id = cursor.lastrowid
+            # Extreure nom del producte
+            name = ""
+            title_selectors = ['h1', '.product-title', '.entry-title', 'title']
+            for selector in title_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    name = element.get_text().strip()
+                    break
             
-        self.connection.commit()
-        cursor.close()
-        return order_id
-
-# Inicialitzar base de dades
-db = DatabaseManager(DATABASE_URL)
-
-# ======================== BOT CLIENT ========================
-
-@client_bot.message_handler(commands=['start'])
-def client_start(message):
-    welcome_msg = """
-🔥 **Benvingut a GODSELLS!** 🔥
-
-Som especialistes en sneakers exclusives.
-
-📝 **Com funciona:**
-• Escriu el nom del model que busques
-• T'enviem disponibilitat i preu
-• Confirmes la teva comanda
-• Rebràs les teves sneakers!
-
-👟 **Què pots buscar:**
-• Nike, Adidas, Jordan...
-• Especifica color i talla si la coneixes
-• També pots enviar una foto del model
-
-Escriu el que busques per començar! 👇
-    """
+            # Extreure preu
+            price = 0.0
+            price_selectors = ['.price', '.woocommerce-Price-amount', '.product-price', '[class*="price"]']
+            for selector in price_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    price_text = element.get_text()
+                    # Extreure número del preu
+                    import re
+                    price_match = re.search(r'€(\d+,?\d*)', price_text)
+                    if price_match:
+                        price = float(price_match.group(1).replace(',', '.'))
+                        break
+            
+            # Extreure categoria (basat en URL o contingut)
+            category = "General"
+            if 'jordan' in product_url.lower() or 'jordan' in name.lower():
+                category = "Jordan"
+            elif 'nike' in product_url.lower() or 'nike' in name.lower():
+                category = "Nike"
+            elif 'adidas' in product_url.lower() or 'adidas' in name.lower():
+                category = "Adidas"
+            elif 'new-balance' in product_url.lower() or 'new balance' in name.lower():
+                category = "New Balance"
+            
+            # Descripció bàsica
+            description = f"Sneakers de qualitat {name}"
+            
+            return {
+                'name': name,
+                'description': description,
+                'category': category,
+                'price': price,
+                'url': product_url,
+                'sizes': "36,37,38,39,40,41,42,43,44,45"  # Talles estàndard
+            }
+            
+        except Exception as e:
+            print(f"❌ Error extraient {product_url}: {e}")
+            return None
     
-    client_bot.send_message(message.chat.id, welcome_msg, parse_mode='Markdown')
-
-@client_bot.message_handler(content_types=['text'])
-def client_cerca_producte(message):
-    terme_cerca = message.text.strip()
-    user_id = message.from_user.id
-    nom_usuari = f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip()
-    username = message.from_user.username or "sense_username"
-    
-    # Buscar a la base de dades
-    producte = db.buscar_producte(terme_cerca)
-    
-    if producte:
-        # Producte trobat
-        id_prod, nom, descripcio, categoria, talles, preu_web, preu_venda, marge, url, imatge, data, actiu = producte
+    def scrape_all_products(self):
+        """Procés complet d'extracció"""
+        print("🚀 Iniciant extracció completa de platanosneaker.com")
         
-        resposta = f"""
-✅ **PRODUCTE DISPONIBLE!**
-
-👟 **{nom}**
-📝 {descripcio}
-💰 **Preu: {preu_venda}€**
-📏 **Talles disponibles:** {talles}
-
-Vols fer la comanda? Escriu la talla que vols:
-Exemple: "Talla 42" o "42"
-        """
+        # Obtenir tots els enllaços
+        product_links = self.get_all_product_links()
         
-        client_bot.send_message(message.chat.id, resposta, parse_mode='Markdown')
+        # Extreure cada producte
+        for i, link in enumerate(product_links):
+            print(f"📦 Extraient producte {i+1}/{len(product_links)}: {link}")
+            
+            product = self.extract_product_info(link)
+            if product:
+                self.products.append(product)
+            
+            # Pausa per no sobrecarregar el servidor
+            time.sleep(1)
         
-    else:
-        # Producte NO trobat - afegir a consultes pendents
-        db.afegir_consulta_pendent(user_id, nom_usuari, username, terme_cerca)
-        
-        resposta = """
-🔍 **ESTEM BUSCANT EL TEU PRODUCTE...**
-
-No tenim aquest model al catàleg ara mateix, però estem consultant amb els nostres proveïdors.
-
-⏰ **T'avisarem tan aviat com el trobem!**
-
-Mentre tant, pots continuar buscant altres models.
-        """
-        
-        client_bot.send_message(message.chat.id, resposta, parse_mode='Markdown')
-        
-        # Notificar a l'admin
-        if ADMIN_USER_ID:
-            admin_msg = f"""
-🔔 **NOVA CONSULTA PENDENT**
-
-👤 Client: {nom_usuari} (@{username})
-🔍 Busca: **{terme_cerca}**
-📅 {time.strftime('%d/%m/%Y %H:%M')}
-
-Usa /consultes per veure totes les pendents.
-            """
-            admin_bot.send_message(ADMIN_USER_ID, admin_msg, parse_mode='Markdown')
-
-@client_bot.message_handler(content_types=['photo'])
-def client_foto_producte(message):
-    user_id = message.from_user.id
-    nom_usuari = f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip()
-    username = message.from_user.username or "sense_username"
+        print(f"✅ Extracció completada! {len(self.products)} productes extrets")
+        return self.products
     
-    # Obtenir la foto
-    file_info = client_bot.get_file(message.photo[-1].file_id)
-    foto_url = f"https://api.telegram.org/file/bot{CLIENT_BOT_TOKEN}/{file_info.file_path}"
+    def save_to_csv(self, filename="platanos_products.csv"):
+        """Guarda productes a CSV"""
+        with open(filename, 'w', newline='', encoding='utf-8') as file:
+            writer = csv.DictWriter(file, fieldnames=['name', 'description', 'category', 'price', 'url', 'sizes'])
+            writer.writeheader()
+            writer.writerows(self.products)
+        print(f"💾 Productes guardats a {filename}")
     
-    caption = message.caption or "Foto enviada sense descripció"
-    
-    # Afegir consulta pendent amb foto
-    db.afegir_consulta_pendent(user_id, nom_usuari, username, "Consulta per foto", caption)
-    
-    resposta = """
-📸 **FOTO REBUDA!**
-
-Estem analitzant la imatge per identificar el model.
-
-⏰ **T'avisarem tan aviat com el trobem!**
-    """
-    
-    client_bot.send_message(message.chat.id, resposta, parse_mode='Markdown')
-    
-    # Notificar admin amb la foto
-    if ADMIN_USER_ID:
-        admin_msg = f"""
-🔔 **NOVA CONSULTA AMB FOTO**
-
-👤 Client: {nom_usuari} (@{username})
-📸 Foto enviada
-💬 Descripció: {caption}
-📅 {time.strftime('%d/%m/%Y %H:%M')}
-        """
-        admin_bot.send_photo(ADMIN_USER_ID, message.photo[-1].file_id, caption=admin_msg, parse_mode='Markdown')
-
-# ======================== BOT ADMIN ========================
-
-@admin_bot.message_handler(commands=['start'])
-def admin_start(message):
-    global ADMIN_USER_ID
-    ADMIN_USER_ID = message.from_user.id
-    
-    welcome_msg = """
-⚙️ **GODSELLS ADMIN PANEL**
-
-🎛️ **Comandes disponibles:**
-
-📋 `/consultes` - Veure consultes pendents
-🛒 `/comandes` - Veure comandes pendents  
-➕ `/afegir` - Afegir nou producte
-📊 `/stats` - Estadístiques
-ℹ️ `/help` - Ajuda completa
-
-Sistema connectat correctament! ✅
-    """
-    
-    admin_bot.send_message(message.chat.id, welcome_msg, parse_mode='Markdown')
-
-@admin_bot.message_handler(commands=['consultes'])
-def admin_consultes(message):
-    consultes = db.obtenir_consultes_pendents()
-    
-    if not consultes:
-        admin_bot.send_message(message.chat.id, "📭 No hi ha consultes pendents.")
-        return
-    
-    resposta = "📋 **CONSULTES PENDENTS:**\n\n"
-    
-    for consulta in consultes:
-        id_consulta, user_id, nom, username, producte, descripcio, foto, data, estat = consulta
-        resposta += f"""
-🔹 **ID #{id_consulta}**
-👤 {nom} (@{username})
-🔍 Busca: **{producte}**
-📅 {data}
-➖➖➖➖➖➖
-"""
-    
-    resposta += "\nUsa `/afegir` per afegir productes nous al catàleg."
-    
-    admin_bot.send_message(message.chat.id, resposta, parse_mode='Markdown')
-
-@admin_bot.message_handler(commands=['afegir'])
-def admin_afegir_producte(message):
-    help_msg = """
-➕ **AFEGIR PRODUCTE NOU**
-
-**Format:** `/afegir nom | descripció | categoria | talles | preu_web | preu_venda`
-
-**Exemple:**
-`/afegir Air Jordan 4 Retro Bred | Sneakers clàssiques negres i vermelles | Jordan | 40,41,42,43,44,45 | 75.95 | 125.00`
-
-**Camps:**
-• **nom**: Nom del producte
-• **descripció**: Descripció del producte  
-• **categoria**: Nike, Adidas, Jordan, etc.
-• **talles**: Separades per comes
-• **preu_web**: Preu a platanosneaker.com
-• **preu_venda**: El teu preu de venda
-    """
-    
-    admin_bot.send_message(message.chat.id, help_msg, parse_mode='Markdown')
-
-@admin_bot.message_handler(func=lambda message: message.text.startswith('/afegir '))
-def admin_processar_afegir(message):
-    try:
-        # Parsejar la comanda - treure '/afegir ' (8 caràcters)
-        content = message.text[8:].strip()
-        parts = [part.strip() for part in content.split('|')]
-        
-        if len(parts) != 6:
-            admin_bot.send_message(message.chat.id, f"❌ Format incorrecte. Esperava 6 parts, rebut {len(parts)}.\nUsa `/afegir` sense paràmetres per veure l'exemple.")
+    def save_to_railway_db(self, database_url):
+        """Puja productes directament a Railway PostgreSQL"""
+        if not database_url:
+            print("❌ DATABASE_URL no configurada")
             return
         
-        nom = parts[0].strip()
-        descripcio = parts[1].strip()
-        categoria = parts[2].strip()
-        talles = parts[3].strip()
-        preu_web = float(parts[4].strip())
-        preu_venda = float(parts[5].strip())
-        
-        # Afegir a la base de dades
-        product_id = db.afegir_producte(nom, descripcio, categoria, talles, preu_web, preu_venda)
-        
-        marge = ((preu_venda - preu_web) / preu_web) * 100
-        
-        confirmacio = f"""
-✅ **PRODUCTE AFEGIT CORRECTAMENT!**
-
-🆔 **ID:** #{product_id}
-👟 **Nom:** {nom}
-📝 **Descripció:** {descripcio}
-🏷️ **Categoria:** {categoria}
-📏 **Talles:** {talles}
-💰 **Preu web:** {preu_web}€
-💰 **Preu venda:** {preu_venda}€
-📈 **Marge:** {marge:.1f}%
-
-Els clients amb consultes pendents seran notificats automàticament.
-        """
-        
-        admin_bot.send_message(message.chat.id, confirmacio, parse_mode='Markdown')
-        
-        # TODO: Notificar clients que esperaven aquest tipus de producte
-        
-    except ValueError:
-        admin_bot.send_message(message.chat.id, "❌ Error en els preus. Han de ser números vàlids.")
-    except Exception as e:
-        admin_bot.send_message(message.chat.id, f"❌ Error afegint producte: {str(e)}")
-
-@admin_bot.message_handler(commands=['help'])
-def admin_help(message):
-    help_msg = """
-⚙️ **GUIA COMPLETA ADMIN**
-
-**🔍 Gestió de consultes:**
-`/consultes` - Veure què busquen els clients
-
-**📦 Gestió de productes:**
-`/afegir` - Instruccions per afegir productes
-`/afegir nom | desc | cat | talles | preu_web | preu_venda`
-
-**🛒 Gestió de comandes:**
-`/comandes` - Veure comandes pendents
-`/stats` - Estadístiques de vendes
-
-**💡 Flux de treball:**
-1. Client busca producte
-2. Si no existeix → reps notificació
-3. Tu afegeixes el producte amb `/afegir`
-4. Client rep notificació automàtica
-5. Client fa comanda → tu la gestionnes
-    """
+        try:
+            conn = psycopg2.connect(database_url)
+            cursor = conn.cursor()
+            
+            # Insertar cada producte
+            for product in self.products:
+                # Calcular preu de venda amb marge del 50%
+                sale_price = product['price'] * 1.5
+                
+                cursor.execute("""
+                    INSERT INTO productes (nom, descripcio, categoria, talles_disponibles, 
+                                         preu_web_platanos, preu_venda_meu, marge, url_producte)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    product['name'],
+                    product['description'], 
+                    product['category'],
+                    product['sizes'],
+                    product['price'],
+                    sale_price,
+                    50.0,
+                    product['url']
+                ))
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            print(f"✅ {len(self.products)} productes pujats a Railway!")
+            
+        except Exception as e:
+            print(f"❌ Error pujant a Railway: {e}")
     
-    admin_bot.send_message(message.chat.id, help_msg, parse_mode='Markdown')
+    def generate_telegram_commands(self, markup=50):
+        """Genera comandes /afegir per Telegram"""
+        commands = []
+        for product in self.products:
+            sale_price = round(product['price'] * (1 + markup/100), 2)
+            command = f"/afegir {product['name']} | {product['description']} | {product['category']} | {product['sizes']} | {product['price']} | {sale_price}"
+            commands.append(command)
+        
+        # Guardar en arxiu
+        with open('telegram_commands.txt', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(commands))
+        
+        print(f"📱 {len(commands)} comandes Telegram generades!")
+        return commands
 
-# Funció per executar ambdós bots
-def run_bots():
-    def run_client():
-        logger.info("Bot client iniciat...")
-        client_bot.polling(none_stop=True)
+def main():
+    scraper = PlatanoscrapeR()
     
-    def run_admin():
-        logger.info("Bot admin iniciat...")
-        admin_bot.polling(none_stop=True)
+    # Extreure tots els productes
+    products = scraper.scrape_all_products()
     
-    # Crear threads per cada bot
-    client_thread = threading.Thread(target=run_client)
-    admin_thread = threading.Thread(target=run_admin)
+    if products:
+        # Guardar a CSV
+        scraper.save_to_csv()
+        
+        # Generar comandes Telegram
+        commands = scraper.generate_telegram_commands()
+        
+        # Si tenim DATABASE_URL, pujar directament
+        database_url = os.environ.get('DATABASE_URL')
+        if database_url:
+            scraper.save_to_railway_db(database_url)
+        
+        print("\n🎯 OPCIONS DISPONIBLES:")
+        print("1. Arxiu CSV creat: platanos_products.csv")
+        print("2. Comandes Telegram: telegram_commands.txt")
+        print("3. Base de dades Railway actualitzada (si DATABASE_URL configurada)")
     
-    client_thread.start()
-    admin_thread.start()
-    
-    client_thread.join()
-    admin_thread.join()
+    else:
+        print("❌ No s'han pogut extreure productes")
 
 if __name__ == "__main__":
-    logger.info("🚀 Iniciant sistema GODSELLS...")
-    logger.info("📱 Bots configurats correctament")
-    logger.info("🗄️ Base de dades connectada")
-    
-    run_bots()
+    main()
